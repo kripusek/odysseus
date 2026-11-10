@@ -22,3 +22,9 @@ Dodatkowe informacje o konfiguracji i ograniczeniach znajdują się w `website/s
 
 Potwierdzony test rzeczywistego czatu API z lokalnym modelem, logowaniem i
 tymczasową bazą: [TESTY-WINDOWS-KRIPUSEK.md](TESTY-WINDOWS-KRIPUSEK.md).
+
+## Opcjonalny launcher modelu KripAI
+
+Windows / PowerShell: po przygotowaniu środowiska przez `START.cmd` uruchom w osobnym oknie `./MODEL-KRIPAI.cmd`. Launcher czyta istniejący model `%LOCALAPPDATA%\KripAI-data\models\model.gguf` i używa `%LOCALAPPDATA%\KripAI\runtime\llama\llama-server.exe`. Serwer słucha wyłącznie na `127.0.0.1:17012`; w Odysseus dodaj endpoint `http://127.0.0.1:17012/v1`. Jako klucz endpointu wpisz lokalnie zawartość pliku `%LOCALAPPDATA%\Odysseus-kripusek-data\private-model\llama-api-key.txt`, wygenerowanego przy pierwszym starcie. Dostęp zdalny wymaga osobno skonfigurowanego bezpiecznego dostępu do zalogowanego Odysseusa.
+
+Launcher odmawia startu przy wykryciu znanych gier lub serwerów modeli, poniżej 4096 MiB wolnej pamięci GPU, przy wielu GPU lub gdy nie może przeprowadzić kontroli. Lista nazw nie obejmuje wszystkich programów korzystających z GPU. Kontrola jest migawką; nie powstrzymuje innego programu przed zajęciem GPU po uruchomieniu. Jednoczesny start dwóch kopii tego launchera blokuje mutex, a Windows Job Object kończy proces modelu także po przymusowym zamknięciu launchera. Zatrzymaj go przez Ctrl+C albo zamknięcie okna. Serwer uruchamia się z 12 warstwami GPU i kontekstem 2048; nie zmienia ustawień KripAI.
