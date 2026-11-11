@@ -21,6 +21,7 @@ from src.constants import AUTH_FILE
 
 PAIRING_VERSION = 1
 COMPANION_SCOPE = "chat"
+PAIRING_SCOPES = "chat,companion"
 
 
 _COMPANION_IPV4_NETWORKS = tuple(
@@ -111,11 +112,36 @@ def parse_companion_base_url(value: str) -> tuple[str, int]:
     return host, port or 80
 
 
-def configured_companion_origin() -> tuple[str, int] | None:
+PUBLIC_COMPANION_ORIGIN = "https://ai.kripusek.top"
+
+
+def configured_access_credentials() -> dict[str, str]:
+    """Read the operator-managed private service-token file without logging it."""
+    path = os.environ.get("COMPANION_ACCESS_CREDENTIALS_FILE")
+    if not path:
+        raise ValueError("COMPANION_ACCESS_CREDENTIALS_FILE is required for HTTPS pairing")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            value = json.load(f)
+    except (OSError, ValueError, UnicodeError):
+        raise ValueError("Cannot read COMPANION_ACCESS_CREDENTIALS_FILE") from None
+    keys = ("cf_access_client_id", "cf_access_client_secret")
+    if not isinstance(value, dict) or set(value) != set(keys):
+        raise ValueError("Invalid COMPANION_ACCESS_CREDENTIALS_FILE contents")
+    if any(not isinstance(value[k], str) or not value[k] or len(value[k]) > 1024
+           or not value[k].isascii() or any(ord(c) <= 32 or ord(c) == 127 for c in value[k])
+           for k in keys):
+        raise ValueError("Invalid COMPANION_ACCESS_CREDENTIALS_FILE contents")
+    return {k: value[k] for k in keys}
+
+
+def configured_companion_origin() -> tuple[str, int] | str | None:
     """Return the validated operator-configured v1 address, if any."""
     value = os.environ.get("COMPANION_BASE_URL")
     if value is None or value == "":
         return None
+    if value == PUBLIC_COMPANION_ORIGIN:
+        return value
     return parse_companion_base_url(value)
 
 
@@ -179,7 +205,12 @@ def find_admin_user() -> str | None:
     return next(iter(users), None)
 
 
-def mint_token(owner: str, name: str = "companion") -> tuple[str, str]:
+def generate_token() -> str:
+    return "ody_" + secrets.token_urlsafe(32)
+
+
+def mint_token(owner: str, name: str = "companion", *, raw_token: str | None = None,
+               confined: bool = False) -> tuple[str, str]:
     """Create a chat-scoped API token row and return (token_id, raw_token).
 
     The raw token is returned ONCE -- only its bcrypt hash + an 8-char prefix
@@ -188,7 +219,8 @@ def mint_token(owner: str, name: str = "companion") -> tuple[str, str]:
     """
     from core.database import get_db_session, ApiToken
 
-    raw_token = "ody_" + secrets.token_urlsafe(32)
+    if raw_token is None:
+        raw_token = generate_token()
     token_hash = bcrypt.hashpw(raw_token.encode(), bcrypt.gensalt()).decode()
     token_id = str(uuid.uuid4())[:8]
 
@@ -199,7 +231,7 @@ def mint_token(owner: str, name: str = "companion") -> tuple[str, str]:
             name=name,
             token_hash=token_hash,
             token_prefix=raw_token[:8],
-            scopes=COMPANION_SCOPE,
+            scopes=PAIRING_SCOPES if confined else COMPANION_SCOPE,
             is_active=True,
         ))
     return token_id, raw_token

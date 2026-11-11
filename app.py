@@ -464,6 +464,12 @@ if AUTH_ENABLED:
                         request.state.api_token_id = matched_id
                         request.state.api_token_owner = matched_owner
                         request.state.api_token_scopes = matched_scopes
+                        # Companion is a confined credential; it must never reach
+                        # the general chat, admin, integration, or tool routes.
+                        if "companion" in matched_scopes:
+                            from companion.safe_chat import companion_route_allowed
+                            if not companion_route_allowed(request.method, path):
+                                return JSONResponse(status_code=403, content={"error": "Companion route forbidden"})
                         return await call_next(request)
                 except Exception:
                     logger.warning("API token auth error", exc_info=False)

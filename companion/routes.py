@@ -20,7 +20,7 @@ on a GET would be unsafe (Lax cookies ride top-level GET navigations), so GET
 import html
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from core.middleware import require_admin
 from src.auth_helpers import _auth_disabled, get_current_user
@@ -65,7 +65,16 @@ def require_models_scope(request: Request) -> None:
         raise HTTPException(403, "API token requires chat scope")
 
 
-def mint_pairing_token(owner: str, invalidate=None) -> tuple[str, str]:
+def require_pairing_admin(request: Request) -> None:
+    """Pairing credentials require an authenticated admin session, never a bearer."""
+    if _auth_disabled() or getattr(request.state, "api_token", False):
+        raise HTTPException(403, "Admin session required")
+    require_admin(request)
+    if not get_current_user(request):
+        raise HTTPException(403, "Admin session required")
+
+
+def mint_pairing_token(owner: str, invalidate=None, *, raw_token=None, confined=False) -> tuple[str, str]:
     """Mint a pairing token AND invalidate the auth middleware's in-memory token
     cache, so the new token is accepted on the very next request without a server
     restart. Returns (token_id, raw_token); the raw token is shown once.
@@ -73,7 +82,10 @@ def mint_pairing_token(owner: str, invalidate=None) -> tuple[str, str]:
     `invalidate` is the app's request.app.state.invalidate_token_cache callable
     (passed in so this stays a pure, testable unit).
     """
-    token_id, raw_token = _pairing.mint_token(owner)
+    if raw_token is None and not confined:
+        token_id, raw_token = _pairing.mint_token(owner)
+    else:
+        token_id, raw_token = _pairing.mint_token(owner, raw_token=raw_token, confined=confined)
     if callable(invalidate):
         invalidate()
     return token_id, raw_token
@@ -81,6 +93,9 @@ def mint_pairing_token(owner: str, invalidate=None) -> tuple[str, str]:
 
 def setup_companion_routes() -> APIRouter:
     router = APIRouter(prefix="/api/companion", tags=["companion"])
+
+    from companion.safe_chat import safe_chat
+    router.add_api_route("/safe-chat", safe_chat, methods=["POST"])
 
     @router.get("/ping")
     def ping(request: Request):
@@ -103,7 +118,9 @@ def setup_companion_routes() -> APIRouter:
             "name": "odysseus",
             "version": APP_VERSION,
             "owner": token_owner(request),
-            "capabilities": {"chat": True, "streaming": True},
+            "capabilities": {"chat": True, "streaming": "companion" not in (
+                getattr(request.state, "api_token_scopes", None) or []
+            )},
         }
 
     @router.get("/models")
@@ -173,7 +190,7 @@ def setup_companion_routes() -> APIRouter:
         top-level GET navigations, so minting on GET would be triggerable by a
         link or <img> (CSRF). The actual mint is the POST handler below.
         """
-        require_admin(request)
+        require_pairing_admin(request)
         page = """<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Pair a device</title>
@@ -199,25 +216,42 @@ def setup_companion_routes() -> APIRouter:
         protection as POST /api/tokens). Minting invalidates the token cache so
         the code works immediately, no restart. `?format=json` returns the
         payload for an in-app pairing screen."""
-        require_admin(request)
+        require_pairing_admin(request)
         try:
             configured_origin = _pairing.configured_companion_origin()
+            access_credentials = (
+                _pairing.configured_access_credentials()
+                if isinstance(configured_origin, str) else None
+            )
         except ValueError as exc:
             raise HTTPException(500, str(exc)) from None
         owner = get_current_user(request)
         invalidate = getattr(request.app.state, "invalidate_token_cache", None)
-        token_id, raw_token = mint_pairing_token(owner, invalidate)
+        if access_credentials is None:
+            token_id, raw_token = mint_pairing_token(owner, invalidate)
+        else:
+            raw_token = _pairing.generate_token()
 
-        if configured_origin:
+        if isinstance(configured_origin, str):
+            host, port = "ai.kripusek.top", 443
+            hosts = [host]
+        elif configured_origin:
             host, port = configured_origin
             hosts = [host]
         else:
             hosts = _pairing.lan_ip_candidates()
             host = hosts[0] if hosts else "127.0.0.1"
             port = request.url.port or _pairing.default_port()
-        payload = _pairing.pairing_payload(host, port, raw_token)
+        if access_credentials is not None:
+            payload = {"v": 2, "base_url": configured_origin, "token": raw_token, **access_credentials}
+        else:
+            payload = _pairing.pairing_payload(host, port, raw_token)
         qr = _pairing.pairing_qr_png_data_uri(payload)
         qr_ok = bool(qr and qr.startswith("data:image/png;base64,"))
+        if access_credentials is not None:
+            if not qr_ok:
+                raise HTTPException(500, "QR rendering unavailable; no token created")
+            token_id, _ = mint_pairing_token(owner, invalidate, raw_token=raw_token, confined=True)
 
         if (request.query_params.get("format") or "").lower() == "json":
             response = {
@@ -229,7 +263,7 @@ def setup_companion_routes() -> APIRouter:
                 "payload": payload,
                 "qr": qr if qr_ok else None,
             }
-            return response
+            return JSONResponse(response, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
 
         import json as _json
         payload_json = _json.dumps(payload, separators=(",", ":"))
@@ -238,6 +272,12 @@ def setup_companion_routes() -> APIRouter:
         qr_block = (
             f'<img src="{html.escape(qr)}" alt="Pairing QR" width="260" height="260">'
             if qr_ok else "<p><em>QR rendering unavailable -- enter the details manually.</em></p>"
+        )
+        details_block = "" if access_credentials is not None else (
+            f'<div class="row"><strong>Host:</strong> <code>{html.escape(host)}</code></div>'
+            f'<div class="row"><strong>Port:</strong> <code>{html.escape(str(port))}</code></div>'
+            f'<div class="row"><strong>Token:</strong> <code>{html.escape(raw_token)}</code></div>'
+            f'<div class="row"><strong>Payload:</strong> <code>{html.escape(payload_json)}</code></div>'
         )
         page = f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -252,14 +292,11 @@ def setup_companion_routes() -> APIRouter:
 <body><div class="card">
   <h2>Pairing code</h2>
   {qr_block}
-  <div class="row"><strong>Host:</strong> <code>{html.escape(host)}</code></div>
-  <div class="row"><strong>Port:</strong> <code>{html.escape(str(port))}</code></div>
-  <div class="row"><strong>Token:</strong> <code>{html.escape(raw_token)}</code></div>
-  <div class="row"><strong>Payload:</strong> <code>{html.escape(payload_json)}</code></div>
+  {details_block}
   <p class="warn">Shown once. This grants chat access to your Odysseus; revoke it
-  in Settings &rarr; API tokens (id <code>{html.escape(token_id)}</code>). The
-  device must be on the same network, and the server must bind to your LAN.</p>
+  in Settings &rarr; API tokens (id <code>{html.escape(token_id)}</code>).
+  Treat the QR and its contents as passwords. Cloudflare Access credentials, if present, grant their configured access independently of this token.</p>
 </div></body></html>"""
-        return HTMLResponse(page)
+        return HTMLResponse(page, headers={"Cache-Control": "no-store", "Pragma": "no-cache", "Referrer-Policy": "no-referrer"})
 
     return router

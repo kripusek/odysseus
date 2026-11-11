@@ -9,6 +9,7 @@ Covers what the review asked for:
 """
 
 import contextlib
+import json
 import os
 import sys
 import types
@@ -65,8 +66,9 @@ def _companion_pairing_stubs(monkeypatch):
             _mm = types.ModuleType(_name)
             for _k, _v in _attrs.items():
                 setattr(_mm, _k, _v)
-            sys.modules[_name] = _mm
-        monkeypatch.setitem(sys.modules, _name, sys.modules[_name])
+            monkeypatch.setitem(sys.modules, _name, _mm)
+        else:
+            monkeypatch.setitem(sys.modules, _name, sys.modules[_name])
 
 
 from fastapi import HTTPException  # noqa: E402
@@ -300,7 +302,7 @@ def test_pair_is_minted_via_post_not_get():
 
 
 def test_pair_page_uses_imported_admin_gate(monkeypatch):
-    monkeypatch.setattr(R, "require_admin", lambda request: None)
+    monkeypatch.setattr(R, "require_pairing_admin", lambda request: None)
     response = _pair_route("GET")(SimpleNamespace())
 
     assert "Pair a device" in str(getattr(response, "body", response))
@@ -308,7 +310,7 @@ def test_pair_page_uses_imported_admin_gate(monkeypatch):
 
 def test_pair_get_renders_form_without_minting(monkeypatch):
     mint = MagicMock(side_effect=AssertionError("GET must not mint a token"))
-    monkeypatch.setattr(R, "require_admin", lambda request: None, raising=False)
+    monkeypatch.setattr(R, "require_pairing_admin", lambda request: None, raising=False)
     monkeypatch.setattr(R, "mint_pairing_token", mint)
 
     response = _pair_route("GET")(_fake_pair_request())
@@ -322,13 +324,15 @@ def test_pair_get_renders_form_without_minting(monkeypatch):
 
 def test_pair_post_json_returns_pairing_payload(monkeypatch):
     mint = MagicMock(return_value=("tok123", "ody_raw"))
-    monkeypatch.setattr(R, "require_admin", lambda request: None, raising=False)
+    monkeypatch.setattr(R, "require_pairing_admin", lambda request: None, raising=False)
     monkeypatch.setattr(R, "get_current_user", lambda request: "alice")
     monkeypatch.setattr(R, "mint_pairing_token", mint)
     monkeypatch.setattr(R._pairing, "lan_ip_candidates", lambda: ["192.168.1.50"])
 
     request = _fake_pair_request(format="json", port=7000)
-    response = _pair_route("POST")(request)
+    raw_response = _pair_route("POST")(request)
+    assert raw_response.headers["cache-control"] == "no-store"
+    response = json.loads(raw_response.body)
 
     mint.assert_called_once_with("alice", request.app.state.invalidate_token_cache)
     assert response["host"] == "192.168.1.50"
@@ -359,14 +363,14 @@ def test_pair_post_json_prefers_configured_origin(monkeypatch):
     monkeypatch.setenv("COMPANION_BASE_URL", "http://odysseus.local:7000")
     mint = MagicMock(return_value=("tok123", "ody_raw"))
     discovery = MagicMock(side_effect=AssertionError("configured origin must skip LAN discovery"))
-    monkeypatch.setattr(R, "require_admin", lambda request: None, raising=False)
+    monkeypatch.setattr(R, "require_pairing_admin", lambda request: None, raising=False)
     monkeypatch.setattr(R, "get_current_user", lambda request: "alice")
     monkeypatch.setattr(R, "mint_pairing_token", mint)
     monkeypatch.setattr(R._pairing, "lan_ip_candidates", discovery)
     monkeypatch.setattr(R._pairing, "pairing_qr_png_data_uri", lambda payload: None)
 
     request = _fake_pair_request(format="json", port=7000)
-    response = _pair_route("POST")(request)
+    response = json.loads(_pair_route("POST")(request).body)
 
     assert response["host"] == "odysseus.local"
     assert response["port"] == 7000
@@ -396,7 +400,7 @@ def test_pair_post_rejects_invalid_config_before_mint_without_echoing_it(monkeyp
         f"http://admin:{configured_secret}@odysseus.local",
     )
     mint = MagicMock(side_effect=AssertionError("invalid config must not mint a token"))
-    monkeypatch.setattr(R, "require_admin", lambda request: None, raising=False)
+    monkeypatch.setattr(R, "require_pairing_admin", lambda request: None, raising=False)
     monkeypatch.setattr(R, "mint_pairing_token", mint)
 
     with pytest.raises(HTTPException) as exc:
@@ -409,13 +413,13 @@ def test_pair_post_rejects_invalid_config_before_mint_without_echoing_it(monkeyp
 
 
 def test_pair_post_json_qr_failure_returns_null_qr(monkeypatch):
-    monkeypatch.setattr(R, "require_admin", lambda request: None, raising=False)
+    monkeypatch.setattr(R, "require_pairing_admin", lambda request: None, raising=False)
     monkeypatch.setattr(R, "get_current_user", lambda request: "alice")
     monkeypatch.setattr(R, "mint_pairing_token", lambda owner, invalidate: ("tok123", "ody_raw"))
     monkeypatch.setattr(R._pairing, "lan_ip_candidates", lambda: ["192.168.1.50"])
     monkeypatch.setattr(R._pairing, "pairing_qr_png_data_uri", lambda payload: None)
 
-    response = _pair_route("POST")(_fake_pair_request(format="json", port=7000))
+    response = json.loads(_pair_route("POST")(_fake_pair_request(format="json", port=7000)).body)
 
     assert response["qr"] is None
     assert response["host"] == "192.168.1.50"
@@ -430,7 +434,7 @@ def test_pair_post_json_qr_failure_returns_null_qr(monkeypatch):
 
 
 def test_pair_post_html_escapes_pairing_values(monkeypatch):
-    monkeypatch.setattr(R, "require_admin", lambda request: None, raising=False)
+    monkeypatch.setattr(R, "require_pairing_admin", lambda request: None, raising=False)
     monkeypatch.setattr(R, "get_current_user", lambda request: "alice")
     monkeypatch.setattr(R, "mint_pairing_token", lambda owner, invalidate: ("tok<123>", "ody_<raw>&"))
     monkeypatch.setattr(R._pairing, "lan_ip_candidates", lambda: ["host<one>&"])
@@ -446,3 +450,93 @@ def test_pair_post_html_escapes_pairing_values(monkeypatch):
     assert "host&lt;one&gt;&amp;" in body
     assert "ody_&lt;raw&gt;&amp;" in body
     assert "tok&lt;123&gt;" in body
+
+
+def test_https_pairing_uses_private_access_file_before_mint(tmp_path, monkeypatch):
+    credentials = {"cf_access_client_id": "fixture-id", "cf_access_client_secret": "fixture-secret"}
+    path = tmp_path / "access.json"
+    path.write_text(json.dumps(credentials), encoding="utf-8")
+    monkeypatch.setenv("COMPANION_BASE_URL", "https://ai.kripusek.top")
+    monkeypatch.setenv("COMPANION_ACCESS_CREDENTIALS_FILE", str(path))
+    monkeypatch.setattr(R, "require_pairing_admin", lambda request: None)
+    monkeypatch.setattr(R, "get_current_user", lambda request: "alice")
+    monkeypatch.setattr(P, "generate_token", lambda: "ody_fixture")
+    mint = MagicMock(side_effect=lambda owner, invalidate, **kw: ("id", kw["raw_token"]))
+    monkeypatch.setattr(R, "mint_pairing_token", mint)
+    monkeypatch.setattr(P, "pairing_qr_png_data_uri", lambda payload: "data:image/png;base64,aW1hZ2U=")
+    response = _pair_route("POST")(_fake_pair_request(format="json"))
+    assert mint.call_args.kwargs == {"raw_token": "ody_fixture", "confined": True}
+    assert response.headers["cache-control"] == "no-store"
+    assert json.loads(response.body)["payload"] == {
+        "v": 2, "base_url": "https://ai.kripusek.top", "token": "ody_fixture", **credentials,
+    }
+
+
+@pytest.mark.parametrize("content", ["not-json", "{}", '{"cf_access_client_id":"only"}',
+    '{"cf_access_client_id":"x", "cf_access_client_secret":"bad\\nvalue"}'])
+def test_https_invalid_access_file_fails_before_mint(tmp_path, monkeypatch, content):
+    path = tmp_path / "access.json"
+    path.write_text(content, encoding="utf-8")
+    monkeypatch.setenv("COMPANION_BASE_URL", "https://ai.kripusek.top")
+    monkeypatch.setenv("COMPANION_ACCESS_CREDENTIALS_FILE", str(path))
+    monkeypatch.setattr(R, "require_pairing_admin", lambda request: None)
+    mint = MagicMock()
+    monkeypatch.setattr(R, "mint_pairing_token", mint)
+    with pytest.raises(HTTPException) as exc:
+        _pair_route("POST")(_fake_pair_request(format="json"))
+    assert exc.value.status_code == 500
+    mint.assert_not_called()
+
+
+def test_pairing_gate_rejects_bearer_even_if_admin_and_auth_disabled(monkeypatch):
+    monkeypatch.setattr(R, "_auth_disabled", lambda: False)
+    with pytest.raises(HTTPException) as exc:
+        R.require_pairing_admin(_req("alice", api_token=True, is_admin=True))
+    assert exc.value.status_code == 403
+    monkeypatch.setattr(R, "_auth_disabled", lambda: True)
+    with pytest.raises(HTTPException) as exc:
+        R.require_pairing_admin(_req("alice", is_admin=True))
+    assert exc.value.status_code == 403
+
+
+def test_https_html_hides_plaintext_credentials(tmp_path, monkeypatch):
+    path = tmp_path / "access.json"
+    path.write_text(json.dumps({"cf_access_client_id": "fixture-id", "cf_access_client_secret": "fixture-secret"}), encoding="utf-8")
+    monkeypatch.setenv("COMPANION_BASE_URL", "https://ai.kripusek.top")
+    monkeypatch.setenv("COMPANION_ACCESS_CREDENTIALS_FILE", str(path))
+    monkeypatch.setattr(R, "require_pairing_admin", lambda request: None)
+    monkeypatch.setattr(R, "get_current_user", lambda request: "alice")
+    monkeypatch.setattr(P, "generate_token", lambda: "ody_fixture")
+    monkeypatch.setattr(R, "mint_pairing_token", lambda owner, invalidate, **kw: ("id", kw["raw_token"]))
+    monkeypatch.setattr(P, "pairing_qr_png_data_uri", lambda payload: "data:image/png;base64,aW1hZ2U=")
+    response = _pair_route("POST")(_fake_pair_request())
+    body = response.body.decode()
+    assert response.headers["cache-control"] == "no-store"
+    assert "data:image/png;base64," in body
+    for secret in ("fixture-id", "fixture-secret", "ody_fixture", "cf_access_client_secret"):
+        assert secret not in body
+
+
+@pytest.mark.parametrize("format", [None, "json"])
+def test_https_qr_failure_never_mints_or_exposes_credentials(tmp_path, monkeypatch, format):
+    path = tmp_path / "access.json"
+    path.write_text(json.dumps({"cf_access_client_id": "fixture-id", "cf_access_client_secret": "fixture-secret"}), encoding="utf-8")
+    monkeypatch.setenv("COMPANION_BASE_URL", "https://ai.kripusek.top")
+    monkeypatch.setenv("COMPANION_ACCESS_CREDENTIALS_FILE", str(path))
+    monkeypatch.setattr(R, "require_pairing_admin", lambda request: None)
+    monkeypatch.setattr(R, "get_current_user", lambda request: "alice")
+    monkeypatch.setattr(P, "generate_token", lambda: "ody_fixture")
+    monkeypatch.setattr(P, "pairing_qr_png_data_uri", lambda payload: None)
+    mint = MagicMock()
+    monkeypatch.setattr(R, "mint_pairing_token", mint)
+    with pytest.raises(HTTPException) as exc:
+        _pair_route("POST")(_fake_pair_request(format=format))
+    assert exc.value.status_code == 500
+    assert "fixture" not in exc.value.detail
+    mint.assert_not_called()
+
+
+def test_v2_mint_persists_companion_scope(monkeypatch):
+    monkeypatch.setitem(sys.modules, "core.database", _db)
+    P.mint_token("alice", raw_token="ody_fixture", confined=True)
+    assert _CAPTURED["scopes"] == "chat,companion"
